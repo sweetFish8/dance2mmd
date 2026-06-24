@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dance2mmd — bone preview</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background:#0d1014; color:#cdd3da; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; padding: 10px 14px; display:flex;
+         gap:12px; align-items:center; background:rgba(13,16,20,.85); backdrop-filter:blur(6px);
+         border-bottom:1px solid #222a33; z-index:10; flex-wrap:wrap; }
+  #hud .grow { flex:1; }
+  button, label.btn { background:#1c2530; color:#cdd3da; border:1px solid #2c3a48; border-radius:6px;
+           padding:6px 12px; cursor:pointer; font-size:13px; }
+  button:hover, label.btn:hover { background:#243140; }
+  #drop { position: fixed; inset: 0; display:flex; align-items:center; justify-content:center;
+          font-size:15px; color:#6b7884; pointer-events:none; }
+  input[type=range]{ width:240px; }
+  #status { font-size:12px; color:#7c8896; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <strong>dance2mmd</strong>
+  <label class="btn">JSONを開く<input id="file" type="file" accept=".json" hidden></label>
+  <button id="play">⏸ Pause</button>
+  <input id="seek" type="range" min="0" max="0" value="0" step="1" />
+  <span id="frame" class="grow">frame 0 / 0</span>
+  <span id="status"></span>
+</div>
+<div id="drop">ここに motion.json をドラッグ＆ドロップ、または「JSONを開く」</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// must match src/dance2mmd/skeleton.py
+const JOINTS = ["CENTER","SPINE","CHEST","NECK","HEAD",
+  "SHOULDER_L","ELBOW_L","WRIST_L","SHOULDER_R","ELBOW_R","WRIST_R",
+  "HIP_L","KNEE_L","ANKLE_L","TOE_L","HIP_R","KNEE_R","ANKLE_R","TOE_R"];
+const PARENT = {CENTER:null,SPINE:"CENTER",CHEST:"SPINE",NECK:"CHEST",HEAD:"NECK",
+  SHOULDER_L:"CHEST",ELBOW_L:"SHOULDER_L",WRIST_L:"ELBOW_L",
+  SHOULDER_R:"CHEST",ELBOW_R:"SHOULDER_R",WRIST_R:"ELBOW_R",
+  HIP_L:"CENTER",KNEE_L:"HIP_L",ANKLE_L:"KNEE_L",TOE_L:"ANKLE_L",
+  HIP_R:"CENTER",KNEE_R:"HIP_R",ANKLE_R:"KNEE_R",TOE_R:"ANKLE_R"};
+const IDX = Object.fromEntries(JOINTS.map((n,i)=>[n,i]));
+const BONES = Object.entries(PARENT).filter(([,p])=>p).map(([c,p])=>[IDX[p],IDX[c]]);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0d1014);
+const cam = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.01, 100);
+cam.position.set(0, 1.0, 3.2);
+const controls = new OrbitControls(cam, renderer.domElement);
+controls.target.set(0, 0.9, 0);
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const dl = new THREE.DirectionalLight(0xffffff, 0.8); dl.position.set(2,4,3); scene.add(dl);
+const grid = new THREE.GridHelper(4, 16, 0x2c3a48, 0x1a222b); scene.add(grid);
+scene.add(new THREE.AxesHelper(0.4));
+
+const jointGeo = new THREE.SphereGeometry(0.022, 12, 12);
+const jointMatL = new THREE.MeshStandardMaterial({color:0x5ad1ff});
+const jointMatR = new THREE.MeshStandardMaterial({color:0xff8a5a});
+const jointMatC = new THREE.MeshStandardMaterial({color:0xc9d1d9});
+const joints = JOINTS.map(n=>{
+  const m = new THREE.Mesh(jointGeo, n.endsWith("_L")?jointMatL:n.endsWith("_R")?jointMatR:jointMatC);
+  scene.add(m); return m;
+});
+const boneMat = new THREE.LineBasicMaterial({color:0x8ea2b5});
+const boneGeo = new THREE.BufferGeometry();
+boneGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(BONES.length*2*3),3));
+const boneLines = new THREE.LineSegments(boneGeo, boneMat); scene.add(boneLines);
+
+let motion=null, frame=0, playing=true, fps=30, last=performance.now(), acc=0;
+const $=id=>document.getElementById(id);
+
+function setMotion(obj){
+  motion = obj; fps = obj.fps||30; frame=0;
+  $('seek').max = obj.positions.length-1; $('seek').value=0;
+  $('drop').style.display='none';
+  $('status').textContent = `backend=${obj.source?.backend||'?'} · ${obj.positions.length}f @ ${fps.toFixed(1)}fps`;
+  // frame camera roughly on the figure
+  applyFrame(0);
+}
+function applyFrame(f){
+  const P = motion.positions[f];
+  for(let i=0;i<JOINTS.length;i++) joints[i].position.set(P[i][0],P[i][1],P[i][2]);
+  const arr = boneGeo.attributes.position.array;
+  BONES.forEach(([a,b],k)=>{
+    arr.set([P[a][0],P[a][1],P[a][2], P[b][0],P[b][1],P[b][2]], k*6);
+  });
+  boneGeo.attributes.position.needsUpdate=true;
+  $('frame').textContent = `frame ${f} / ${motion.positions.length-1}`;
+  $('seek').value = f;
+}
+function tick(now){
+  requestAnimationFrame(tick);
+  if(motion && playing){
+    acc += (now-last)/1000; const step=1/fps;
+    while(acc>=step){ acc-=step; frame=(frame+1)%motion.positions.length; applyFrame(frame); }
+  }
+  last=now; controls.update(); renderer.render(scene,cam);
+}
+requestAnimationFrame(tick);
+
+$('play').onclick=()=>{ playing=!playing; $('play').textContent = playing?'⏸ Pause':'▶ Play'; };
+$('seek').oninput=e=>{ if(!motion)return; playing=false; $('play').textContent='▶ Play';
+  frame=+e.target.value; applyFrame(frame); };
+$('file').onchange=e=>{ const f=e.target.files[0]; if(f) f.text().then(t=>setMotion(JSON.parse(t))); };
+addEventListener('resize',()=>{ cam.aspect=innerWidth/innerHeight; cam.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight); });
+['dragover','drop'].forEach(ev=>addEventListener(ev,e=>e.preventDefault()));
+addEventListener('drop',e=>{ const f=e.dataTransfer.files[0]; if(f) f.text().then(t=>setMotion(JSON.parse(t))); });
+
+// auto-load if served over http with ?motion=
+const q=new URLSearchParams(location.search).get('motion');
+if(q && location.protocol.startsWith('http')){
+  fetch(q).then(r=>r.json()).then(setMotion).catch(()=>{});
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dance2mmd — MMD model + .vmd playback</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:#0d1014; color:#cdd3da; }
+  #hud { position:fixed; top:0; left:0; right:0; padding:10px 14px; display:flex; gap:12px;
+         align-items:center; background:rgba(13,16,20,.85); backdrop-filter:blur(6px);
+         border-bottom:1px solid #222a33; z-index:10; flex-wrap:wrap; }
+  button { background:#1c2530; color:#cdd3da; border:1px solid #2c3a48; border-radius:6px;
+           padding:6px 12px; cursor:pointer; font-size:13px; }
+  button:hover { background:#243140; }
+  #status { font-size:12px; color:#7c8896; }
+  #err { color:#ff8a5a; font-size:12px; }
+  a { color:#5ad1ff; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <strong>dance2mmd · MMD</strong>
+  <button id="play">⏸ Pause</button>
+  <span id="status">loading…</span>
+  <span id="err"></span>
+</div>
+<div id="con" style="position:fixed;left:0;right:0;bottom:0;max-height:30vh;overflow:auto;
+  font:11px ui-monospace,monospace;color:#9aa7b4;background:rgba(13,16,20,.9);
+  border-top:1px solid #222a33;padding:6px 10px;white-space:pre-wrap;z-index:10;"></div>
+<script>
+(function(){
+  const box=document.getElementById('con'); const seen=new Set();
+  function add(tag,args){ const s=tag+' '+Array.from(args).map(a=>{
+    try{return typeof a==='string'?a:(a&&a.message)||JSON.stringify(a)}catch(e){return String(a)}}).join(' ');
+    if(seen.has(s))return; seen.add(s); box.textContent+=s+'\n'; box.scrollTop=box.scrollHeight; }
+  const w=console.warn.bind(console), e=console.error.bind(console);
+  console.warn=function(){add('⚠',arguments);w.apply(null,arguments)};
+  console.error=function(){add('⛔',arguments);e.apply(null,arguments)};
+  window.addEventListener('error',ev=>add('⛔',[ev.message+' @'+(ev.filename||'').split('/').pop()+':'+ev.lineno]));
+  window.addEventListener('unhandledrejection',ev=>add('⛔',[(ev.reason&&ev.reason.message)||ev.reason]));
+})();
+</script>
+
+<!-- Ammo.js (classic script, defines global Ammo factory) for MMD cloth/hair physics -->
+<script src="https://unpkg.com/three@0.160.0/examples/jsm/libs/ammo.wasm.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MMDLoader } from 'three/addons/loaders/MMDLoader.js';
+import { MMDAnimationHelper } from 'three/addons/animation/MMDAnimationHelper.js';
+
+// URLs come from query params so you can point at any model/motion:
+//   mmd.html?model=../models/sparkle/sparkle.pmx&vmd=../data/illit.vmd&audio=../data/illit.mp3
+const q = new URLSearchParams(location.search);
+const MODEL = q.get('model') || '../models/sparkle/sparkle.pmx';
+const VMD   = q.get('vmd')   || '../data/illit.vmd';
+const AUDIO = q.get('audio') || '../data/illit.mp3';
+
+const audio = new Audio(AUDIO); audio.loop = true;
+
+const $ = id => document.getElementById(id);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0d1014);
+const cam = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 1000);
+cam.position.set(0, 14, 32);
+const controls = new OrbitControls(cam, renderer.domElement);
+controls.target.set(0, 11, 0);
+scene.add(new THREE.PolarGridHelper(40, 8, 8, 64, 0x2c3a48, 0x1a222b));
+// moderate lighting — too bright blows out the pale face texture to white
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 0.4));
+const dl = new THREE.DirectionalLight(0xffffff, 0.7); dl.position.set(10,20,15); scene.add(dl);
+
+let helper = null, playing = true;
+const clock = new THREE.Clock();
+
+function frameCamera(mesh) {
+  const box = new THREE.Box3().setFromObject(mesh);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const dist = maxDim * 1.8;
+  cam.near = maxDim / 100; cam.far = maxDim * 100; cam.updateProjectionMatrix();
+  cam.position.set(center.x, center.y + size.y * 0.1, center.z + dist);
+  controls.target.copy(center);
+  controls.update();
+  return { size, center, maxDim };
+}
+
+// init Ammo physics (skirt/sleeve/hair). Falls back to no-physics if it fails.
+let physicsReady = false;
+if (window.Ammo) {
+  try {
+    await window.Ammo({ locateFile: () => 'https://unpkg.com/three@0.160.0/examples/jsm/libs/ammo.wasm.wasm' });
+    physicsReady = true;
+  } catch (e) { console.warn('Ammo init failed, physics off:', e); }
+}
+
+const loader = new MMDLoader();
+$('status').textContent = `loading model: ${MODEL}`;
+loader.loadWithAnimation(MODEL, VMD, (mmd) => {
+  const mesh = mmd.mesh;
+  mesh.frustumCulled = false;
+  if (mesh.skeleton && mesh.skeleton.bones.length) {
+    try { mesh.normalizeSkinWeights(); } catch (e) {}
+  }
+  // Material modes (textures are mojibake-named so the original MMD toon
+  // renders black). 'pretty' = clean pearl figure (default), 'normal' =
+  // rainbow normals (debug), 'orig' = keep the model's own MMD materials.
+  const matMode = q.get('mat') || 'pretty';
+  if (matMode === 'normal') {
+    mesh.material = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide });
+  } else if (matMode === 'pretty') {
+    mesh.material = new THREE.MeshStandardMaterial({
+      color: 0xe9ecf3, roughness: 0.55, metalness: 0.0, side: THREE.DoubleSide });
+  }
+  scene.add(mesh);
+  helper = new MMDAnimationHelper({ afterglow: 2.0 });
+  helper.add(mesh, { animation: mmd.animation, physics: physicsReady });
+  // IK stays ENABLED: the VMD now drives the 左足ＩＫ/右足ＩＫ targets with the
+  // ankle positions, so the solver steps the legs to follow the dance.
+
+  // bones as lines (debug) — only with ?bones=1
+  if (q.get('bones') === '1') {
+    const sk = new THREE.SkeletonHelper(mesh); sk.material.linewidth = 2; scene.add(sk);
+  }
+
+  audio.play().catch(() => {});  // may be blocked until the Play button is clicked
+
+  const g = mesh.geometry;
+  const nVerts = g.attributes.position ? g.attributes.position.count : 0;
+  const nBones = mesh.skeleton ? mesh.skeleton.bones.length : 0;
+  const nTracks = mmd.animation ? mmd.animation.tracks.length : 0;
+  const info = frameCamera(mesh);
+  const msg = `verts=${nVerts} bones=${nBones} animTracks=${nTracks} ` +
+    `bbox=${info.size.x.toFixed(1)}×${info.size.y.toFixed(1)}×${info.size.z.toFixed(1)}`;
+  console.log("[mmd]", msg, info);
+  $('status').textContent = msg;
+  // size the grid to the model
+  const grid = new THREE.GridHelper(info.maxDim * 2, 10, 0x2c3a48, 0x1a222b);
+  grid.position.set(info.center.x, box_min_y(mesh), info.center.z);
+  scene.add(grid);
+}, (xhr) => {
+  if (xhr.lengthComputable) $('status').textContent =
+    `loading… ${(xhr.loaded/1048576).toFixed(1)}MB`;
+}, (e) => {
+  console.error(e);
+  $('err').innerHTML = `load failed: ${e && e.message ? e.message : e}`;
+  $('status').textContent = '';
+});
+
+function box_min_y(mesh){ const b=new THREE.Box3().setFromObject(mesh); return b.min.y; }
+
+$('play').onclick = () => {
+  playing = !playing;
+  $('play').textContent = playing ? '⏸ Pause' : '▶ Play';
+  if (playing) audio.play().catch(() => {}); else audio.pause();
+};
+addEventListener('resize', () => {
+  cam.aspect = innerWidth/innerHeight; cam.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+function tick() {
+  requestAnimationFrame(tick);
+  // clamp dt: large frame spikes make the cloth/hair physics oscillate ("震える")
+  const dt = Math.min(clock.getDelta(), 1 / 60);
+  if (helper && playing) helper.update(dt);
+  controls.update();
+  renderer.render(scene, cam);
+}
+tick();
+</script>
+</body>
+</html>

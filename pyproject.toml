@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dance2mmd"
+version = "0.1.0"
+description = "Dance video -> intermediate bone JSON -> MMD .vmd + three.js preview"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+# Local (Mac, no GPU) extraction backend.
+mediapipe = ["mediapipe>=0.10", "opencv-python>=4.8"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+dance2mmd = "dance2mmd.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

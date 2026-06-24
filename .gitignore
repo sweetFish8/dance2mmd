@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# --- assets NOT committed (third-party / licensed) ---
+# HSR character model + textures (HoYoverse distribution; no redistribution)
+models/
+# copyrighted song/video-derived motion + media
+data/*.mp4
+data/*.mp3
+data/*.npy
+data/*.vmd
+data/illit*.json
+*.zip
+# keep the synthetic sample so the viewer has a demo
+!data/sample_motion.json
+
+# server-side WHAM clone / outputs (if ever present locally)
+WHAM/
+setup_stage*.log
+run_*.log
